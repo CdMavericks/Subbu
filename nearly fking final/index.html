@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ClassSight — Smart Dual Cam Attendance</title>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, #0a041e, #010103 70%);
+      color: #e8f0ff;
+      font-family: "Inter", sans-serif;
+      overflow-x: hidden;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 2rem;
+      color: #00f5ff;
+      text-shadow: 0 0 25px #00e5ff, 0 0 60px #0078ff;
+      margin-top: 20px;
+      letter-spacing: 1px;
+    }
+
+    .wrapper {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      padding: 30px;
+      flex-wrap: wrap;
+    }
+
+    .camera-box {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(0, 255, 255, 0.15);
+      border-radius: 20px;
+      padding: 15px;
+      width: 480px;
+      position: relative;
+      box-shadow: 0 0 20px rgba(0, 255, 255, 0.08);
+      backdrop-filter: blur(12px);
+      transition: all 0.3s ease-in-out;
+    }
+
+    .camera-box:hover {
+      box-shadow: 0 0 30px rgba(0, 255, 255, 0.25);
+      transform: scale(1.02);
+    }
+
+    video, img {
+      width: 100%;
+      border-radius: 12px;
+      background: #000;
+    }
+
+    .status {
+      text-align: center;
+      margin-top: 10px;
+      font-weight: 500;
+      color: #c8dfff;
+      letter-spacing: 0.5px;
+    }
+
+    .neon-ring {
+      border: 3px solid #00e0ff;
+      border-radius: 50%;
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: calc(100% - 20px);
+      height: calc(100% - 70px);
+      pointer-events: none;
+      box-shadow: 0 0 25px #00ffff, inset 0 0 10px #00ffff;
+      opacity: 0.1;
+      animation: pulse 3s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.1; }
+      50% { opacity: 0.3; }
+    }
+
+    .log {
+      width: 95%;
+      height: 150px;
+      margin: 20px auto;
+      background: rgba(0,0,0,0.4);
+      border-radius: 10px;
+      overflow-y: auto;
+      padding: 10px 15px;
+      font-family: monospace;
+      font-size: 0.9rem;
+      border: 1px solid rgba(0,255,255,0.15);
+      color: #b8e1ff;
+      box-shadow: inset 0 0 10px rgba(0,255,255,0.1);
+    }
+
+    .highlight { color: #00ffae; }
+    .warn { color: #ffcc00; }
+    .err { color: #ff7070; }
+  </style>
+</head>
+
+<body>
+  <h1>ClassSight — Smart Dual Cam Attendance</h1>
+
+  <div class="wrapper">
+    <!-- 🟢 CAM 1 (Front Detection) -->
+    <div class="camera-box" id="cam1-box">
+      <video id="cam1" autoplay muted playsinline></video>
+      <div class="neon-ring" id="ring1"></div>
+      <div class="status" id="status1">Cam 1: Initializing...</div>
+    </div>
+
+    <!-- 🔵 CAM 2 (Backend Smart Tracker Stream) -->
+    <div class="camera-box" id="cam2-box">
+      <img src="http://127.0.0.1:8001/stream" alt="Smart Tracker Stream" />
+      <div class="neon-ring" id="ring2"></div>
+      <div class="status" id="status2">Cam 2: Idle</div>
+    </div>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <script>
+    const cam1 = document.getElementById('cam1');
+    const logBox = document.getElementById('log');
+    const status1 = document.getElementById('status1');
+    const status2 = document.getElementById('status2');
+    const ring1 = document.getElementById('ring1');
+    const ring2 = document.getElementById('ring2');
+
+    const API_IDENTIFY = "http://127.0.0.1:8000/api/identify";
+    const API_CAM2 = "http://127.0.0.1:8001/api/initiate_tag";
+
+    const cooldowns = {};
+    const COOLDOWN_MS = 5000;
+    let pending = false;
+    const canvas = document.createElement('canvas');
+
+    function log(msg, type = "") {
+      const time = new Date().toLocaleTimeString();
+      const colorClass = type === "ok" ? "highlight" : type === "warn" ? "warn" : type === "err" ? "err" : "";
+      const el = document.createElement('div');
+      el.className = colorClass;
+      el.textContent = `[${time}] ${msg}`;
+      logBox.prepend(el);
+    }
+
+    async function startCam(videoEl) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        videoEl.srcObject = stream;
+        await new Promise(r => videoEl.onloadedmetadata = r);
+        log("Cam 1 started successfully.", "ok");
+      } catch (e) {
+        log("Cam 1 error: " + e.message, "err");
+      }
+    }
+
+    async function captureImage(video) {
+      const w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h) return null;
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+    }
+
+    async function identifyFace() {
+      if (pending) return;
+      const base64 = await captureImage(cam1);
+      if (!base64) return;
+
+      pending = true;
+      status1.textContent = "Cam 1: Detecting face...";
+      ring1.style.opacity = "0.6";
+
+      try {
+        const res = await fetch(API_IDENTIFY, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_base64: base64 })
+        });
+
+        const data = await res.json();
+
+        if (res.status === 200) {
+          const { usn, name, distance, embedding } = data;
+          if (cooldowns[usn] && Date.now() < cooldowns[usn]) {
+            log(`Duplicate ignored for ${usn}.`, "warn");
+            ring1.style.opacity = "0.1";
+            pending = false;
+            return;
+          }
+
+          log(`Recognized ${name} (${usn}) — distance ${distance.toFixed(4)}`, "ok");
+          status1.textContent = `Cam 1: ${name} recognized`;
+          cooldowns[usn] = Date.now() + COOLDOWN_MS;
+
+          // Trigger Cam 2 verification
+          status2.textContent = "Cam 2: Verifying body...";
+          ring2.style.opacity = "0.5";
+
+          await fetch(API_CAM2, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ usn, live_embedding: embedding })
+          })
+            .then(r => r.json())
+            .then(() => {
+              log(`Cam 2 verification started for ${usn}.`);
+              ring2.style.opacity = "0.9";
+            })
+            .catch(err => {
+              log("Cam 2 handoff failed: " + err.message, "err");
+              ring2.style.opacity = "0.1";
+            });
+
+          setTimeout(() => {
+            ring1.style.opacity = "0.1";
+            ring2.style.opacity = "0.1";
+            status1.textContent = "Cam 1: Idle";
+            status2.textContent = "Cam 2: Idle";
+            pending = false;
+          }, 4000);
+        } else {
+          log("Face not recognized.", "warn");
+          ring1.style.opacity = "0.1";
+          status1.textContent = "Cam 1: Unknown face";
+          pending = false;
+        }
+
+      } catch (e) {
+        log("Identify API failed: " + e.message, "err");
+        pending = false;
+      }
+    }
+
+    setInterval(identifyFace, 1500);
+
+    (async () => {
+      await startCam(cam1);
+      log("Dual Cam system initialized.");
+    })();
+  </script>
+</body>
+</html>
